@@ -8,7 +8,21 @@ const systemMessage = {
   content: '당신은 친절하고 정확한 AI 도우미입니다. 이전 대화의 맥락을 반영해서 답변하세요. 기본적으로 한국어로 답하되 사용자가 요청한 언어를 따르세요. 모르는 사실은 솔직히 모른다고 말하세요.'
 };
 
-export function createApp({ fetchImpl = fetch, apiKey = process.env.OPENAI_API_KEY } = {}) {
+// Error metadata only. Never log raw errors, response bodies, headers, or prompts.
+const safeLabel = (value, values) => values.includes(value) ? value : null;
+const safeRequestId = value => typeof value === 'string' && /^req_[a-zA-Z0-9]{16,64}$/.test(value) ? value : null;
+function upstreamMetadata(response, data) {
+  return {
+    upstreamStatus: response.status,
+    openaiRequestId: safeRequestId(response.headers.get('x-request-id')),
+    errorType: safeLabel(data?.error?.type, ['invalid_request_error', 'authentication_error', 'permission_error', 'rate_limit_error', 'insufficient_quota', 'server_error']),
+    errorCode: safeLabel(data?.error?.code, ['invalid_api_key', 'invalid_json_schema', 'invalid_request', 'model_not_found', 'unsupported_parameter', 'rate_limit_exceeded', 'insufficient_quota', 'billing_hard_limit_reached', 'access_terminated', 'unsupported_country_region_territory']),
+    errorParam: safeLabel(data?.error?.param, ['model', 'messages', 'response_format', 'response_format.json_schema', 'response_format.json_schema.schema', 'max_completion_tokens', 'store']),
+    finishReason: safeLabel(data?.choices?.[0]?.finish_reason, ['stop', 'length', 'content_filter', 'tool_calls', 'function_call'])
+  };
+}
+
+export function createApp({ fetchImpl = fetch, apiKey = process.env.OPENAI_API_KEY, logError = event => console.error(JSON.stringify(event)) } = {}) {
   const app = express();
   app.disable('x-powered-by');
   app.use((_req, res, next) => {
@@ -32,6 +46,8 @@ export function createApp({ fetchImpl = fetch, apiKey = process.env.OPENAI_API_K
     if (req.body.memory !== undefined && !validMemory(req.body.memory)) {
       return res.status(400).json({ error: '대화 기억 형식이 올바르지 않습니다. 새 대화를 시작해 주세요.' });
     }
+    let stage = 'prepare';
+    let metadata = { upstreamStatus: null, openaiRequestId: null, errorType: null, errorCode: null, errorParam: null, finishReason: null };
     try {
       const memory = req.body.memory ?? emptyMemory();
       const { older, recent } = partitionHistory(messages);
@@ -44,31 +60,45 @@ export function createApp({ fetchImpl = fetch, apiKey = process.env.OPENAI_API_K
       prompt.push(...context);
       const signal = AbortSignal.timeout(50000);
       const complete = async promptMessages => {
+        stage = 'openai_fetch';
+        metadata = { upstreamStatus: null, openaiRequestId: null, errorType: null, errorCode: null, errorParam: null, finishReason: null };
         const response = await fetchImpl('https://api.openai.com/v1/chat/completions', {
           method: 'POST',
           headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ model: 'gpt-4o-mini', messages: promptMessages, max_completion_tokens: 2400, response_format: responseFormat, store: false }),
           signal
         });
+        metadata = upstreamMetadata(response);
         if (!response.ok) {
+          stage = 'openai_http_error';
+          let errorBody;
+          try { errorBody = await response.json(); } catch { /* Do not print non-JSON bodies. */ }
+          metadata = upstreamMetadata(response, errorBody);
           const status = response.status === 429 ? 429 : 502;
           const error = new Error(status === 429 ? 'OpenAI 사용 한도에 도달했습니다. 잠시 후 다시 시도하거나 API 사용 한도를 확인해 주세요.' : 'AI 응답을 가져오지 못했습니다. 서버 API 키와 모델 접근 권한을 확인해 주세요.');
           error.status = status;
           throw error;
         }
+        stage = 'openai_response_json';
         const data = await response.json();
+        metadata = upstreamMetadata(response, data);
         const choice = data.choices?.[0];
-        if (choice?.finish_reason === 'length' || choice?.message?.refusal) throw new Error('Incomplete or refused response');
+        if (choice?.finish_reason === 'length') { stage = 'openai_output_truncated'; throw new Error('Incomplete response'); }
+        if (choice?.message?.refusal) { stage = 'openai_refusal'; throw new Error('Refused response'); }
+        stage = 'structured_output_json';
         const result = JSON.parse(choice?.message?.content);
+        stage = 'structured_output_validation';
         if (typeof result.reply !== 'string' || !validMemory(result.memory)) throw new Error('Invalid structured response');
         return result;
       };
       let result = await complete(prompt);
+      stage = 'reply_validation';
       result.memory = reinforceConstraints(memory, result.memory, messages.at(-1).content);
       // Do not spend output tokens replacing the summary when nothing was compacted.
       if (!older.length) result.memory.summary = memory.summary;
       const activeMemory = structuredClone(result.memory);
       for (let attempt = 0; attempt < 3; attempt++) {
+        stage = 'reply_validation';
         const violation = checkReply(result.reply, activeMemory, messages);
         if (!violation) return res.json({ reply: result.reply, memory: activeMemory, retainedMessages: recent.length });
         if (attempt === 2) return res.status(422).json({ error: '조건을 만족하는 답변을 생성하지 못했습니다. 규칙을 확인하거나 다시 시도해 주세요.' });
@@ -80,7 +110,15 @@ export function createApp({ fetchImpl = fetch, apiKey = process.env.OPENAI_API_K
       }
     } catch (error) {
       const timeout = ['TimeoutError', 'AbortError'].includes(error.name);
-      return res.status(timeout ? 504 : error.status ?? 502).json({ error: timeout ? '응답 시간이 초과되었습니다. 다시 시도해 주세요.' : error.status ? error.message : 'AI 응답 처리에 실패했습니다. 잠시 후 다시 시도해 주세요.' });
+      const diagnostic = {
+        stage, ...metadata,
+        errorKind: safeLabel(error.name, ['Error', 'TypeError', 'SyntaxError', 'TimeoutError', 'AbortError', 'RangeError']),
+        failureReason: error.name === 'TypeError' && /ByteString/.test(error.message) ? 'invalid_header_character' :
+          error.name === 'TypeError' && /invalid header|valid HTTP header value/i.test(error.message) ? 'invalid_header_value' : null,
+        networkCode: safeLabel(error.cause?.code, ['ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_SOCKET', 'CERT_HAS_EXPIRED', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'])
+      };
+      logError({ event: 'chat_api_failure', ...diagnostic });
+      return res.status(timeout ? 504 : error.status ?? 502).json({ error: timeout ? '응답 시간이 초과되었습니다. 다시 시도해 주세요.' : error.status ? error.message : 'AI 응답 처리에 실패했습니다. 잠시 후 다시 시도해 주세요.', diagnostic });
     }
   });
   app.all('/api/chat', (_req, res) => res.status(405).json({ error: 'POST 요청을 사용해 주세요.' }));

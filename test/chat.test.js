@@ -4,7 +4,7 @@ import { createApp } from '../index.js';
 import { emptyMemory } from '../conversation.js';
 
 async function withServer(options, run) {
-  const server = createApp(options).listen(0, '127.0.0.1');
+  const server = createApp({ logError: () => {}, ...options }).listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
   const url = `http://127.0.0.1:${server.address().port}`;
   try { await run(url); }
@@ -143,4 +143,48 @@ test('API 키 누락과 OpenAI 오류를 사용자 메시지로 변환한다', a
     });
   }
   await withServer({ apiKey: 'test', fetchImpl: async () => { throw new DOMException('timeout', 'TimeoutError'); } }, async url => assert.equal((await post(url, messages)).status, 504));
+});
+
+test('실제 OpenAI HTTP 상태와 오류 유형만 기록하고 응답 본문 및 인증정보는 기록하지 않는다', async () => {
+  const events = [];
+  const secret = 'private-credential-value-never-print';
+  await withServer({ apiKey: secret, logError: event => events.push(event), fetchImpl: async () => Response.json({
+    error: { type: 'invalid_request_error', code: 'invalid_api_key', param: null, message: `Secret: ${secret}`, extra: secret }
+  }, { status: 401, headers: { 'x-request-id': 'req_0123456789abcdef0123456789abcdef' } }) }, async url => {
+    const response = await post(url, [{ role: 'user', content: 'Private user conversation' }]);
+    const data = await response.json();
+    assert.equal(response.status, 502);
+    assert.equal(data.diagnostic.upstreamStatus, 401);
+    assert.equal(data.diagnostic.errorType, 'invalid_request_error');
+    assert.equal(data.diagnostic.errorCode, 'invalid_api_key');
+    assert.equal(data.diagnostic.stage, 'openai_http_error');
+    assert.equal(events.length, 1);
+    assert.equal(events[0].event, 'chat_api_failure');
+    const serialized = JSON.stringify({ data, events });
+    assert.ok(!serialized.includes(secret));
+    assert.ok(!serialized.includes('Private user conversation'));
+    assert.ok(!serialized.includes('Authorization'));
+  });
+});
+
+test('HTTP 200의 JSON 처리 실패와 헤더·네트워크 오류를 구분하며 원문 오류를 출력하지 않는다', async () => {
+  const messages = [{ role: 'user', content: '안녕' }];
+  for (const [fetchImpl, stage, upstreamStatus, failureReason, networkCode] of [
+    [async () => new Response('not JSON'), 'openai_response_json', 200, null, null],
+    [async () => Response.json({ choices: [{ message: { content: 'not JSON' } }] }), 'structured_output_json', 200, null, null],
+    [async () => { throw new TypeError('Cannot convert argument to a ByteString: secret-token'); }, 'openai_fetch', null, 'invalid_header_character', null],
+    [async () => { throw new TypeError('fetch failed: secret-token', { cause: { code: 'ECONNRESET' } }); }, 'openai_fetch', null, null, 'ECONNRESET']
+  ]) {
+    const events = [];
+    await withServer({ apiKey: 'test', fetchImpl, logError: event => events.push(event) }, async url => {
+      const response = await post(url, messages);
+      const data = await response.json();
+      assert.equal(response.status, 502);
+      assert.equal(data.diagnostic.stage, stage);
+      assert.equal(data.diagnostic.upstreamStatus, upstreamStatus);
+      assert.equal(data.diagnostic.failureReason, failureReason);
+      assert.equal(data.diagnostic.networkCode, networkCode);
+      assert.doesNotMatch(JSON.stringify({ data, events }), /secret-token|not JSON/);
+    });
+  }
 });
