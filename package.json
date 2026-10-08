@@ -1,0 +1,14 @@
+{
+  "name": "chatchat",
+  "version": "1.0.0",
+  "private": true,
+  "description": "대화 맥락을 기억하는 GPT-4o mini 챗봇",
+  "type": "module",
+  "engines": { "node": "22.x" },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test"
+  },
+  "dependencies": { "dotenv": "^16.4.7", "express": "^5.1.0" }
+}

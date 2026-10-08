@@ -1,0 +1,21 @@
+node_modules/
+.npm-cache/
+.env
+.env.*
+!.env.example
+.vercel/
+*.log
+
+# Local editor, OS and temporary files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.tmp
+
+# Credential and private key files
+.aws/
+.codex/
+.agents/
+*.pem
+*.key

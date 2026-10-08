@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#f7f8fa">
+  <title>ChatChat — AI와 나누는 대화</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="app">
+    <header><a class="brand" href="/" aria-label="ChatChat 홈"><span class="logo">✳</span> ChatChat</a><button id="reset" class="reset" type="button">＋ 새 대화</button></header>
+    <main>
+      <div class="topline"><span><i></i> GPT-4o mini</span><span>생각을 함께 펼쳐 보세요</span></div>
+      <div id="chat-scroll" class="chat-scroll" tabindex="0" aria-label="스크롤 가능한 대화 영역">
+      <section id="welcome" class="welcome">
+        <div class="welcome-icon" aria-hidden="true">✳</div>
+        <p class="eyebrow">YOUR EVERYDAY AI COMPANION</p>
+        <h1>어떤 이야기를<br>나눠 볼까요?</h1>
+        <p class="intro">작은 궁금증부터 새로운 아이디어까지.<br>대화의 흐름을 기억하며 함께 생각할게요.</p>
+        <div class="suggestions">
+          <button type="button" data-prompt="주말에 집에서 할 수 있는 취미 5가지를 추천해 줘."><span>✦</span><strong>새로운 아이디어</strong><small>주말에 즐길 취미 찾기 ↗</small></button>
+          <button type="button" data-prompt="JavaScript의 async와 await를 초보자도 이해할 수 있게 설명해 줘."><span>⌘</span><strong>쉽게 배우기</strong><small>복잡한 개념을 쉽게 이해하기 ↗</small></button>
+          <button type="button" data-prompt="정중한 회의 일정 변경 이메일 초안을 작성해 줘."><span>✎</span><strong>글쓰기 도우미</strong><small>막막한 첫 문장 시작하기 ↗</small></button>
+        </div>
+      </section>
+      <section id="messages" class="messages" aria-label="대화 내용" role="log" aria-live="polite" aria-relevant="additions"></section>
+      </div>
+    </main>
+    <footer>
+      <p id="status" class="status" role="status"></p>
+      <form id="chat-form"><label class="sr-only" for="input">메시지</label><textarea id="input" placeholder="무엇이든 물어보세요…" rows="1" maxlength="8000" required></textarea><button id="send" type="submit" aria-label="메시지 보내기">↑</button></form>
+      <div class="footnote"><span>Enter로 전송 · Shift + Enter로 줄바꿈</span><span>AI 답변은 부정확할 수 있어요.</span></div>
+      <p class="privacy">대화는 이 탭에만 저장됩니다. 새 대화로 기록을 지울 수 있어요.</p>
+    </footer>
+  </div>
+</body>
+</html>
