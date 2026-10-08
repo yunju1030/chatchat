@@ -167,6 +167,29 @@ test('실제 OpenAI HTTP 상태와 오류 유형만 기록하고 응답 본문 �
   });
 });
 
+test('Vercel 환경변수의 앞뒤 공백/줄바꿈을 정리하고 내부의 잘못된 문자는 요청 전에 거부한다', async () => {
+  await withServer({ apiKey: ' \r\n\ttest-key\r\n ', fetchImpl: async (_url, options) => {
+    assert.equal(options.headers.Authorization, 'Bearer test-key');
+    // Use the real Headers implementation to reproduce header validation.
+    assert.equal(new Headers(options.headers).get('Authorization'), 'Bearer test-key');
+    return completion('안녕하세요');
+  } }, async url => {
+    assert.equal((await post(url, [{ role: 'user', content: '안녕' }])).status, 200);
+  });
+  for (const invalidKey of ['test\nkey', 'test\rkey', 'test\u0000key', 'test key', 'test\tkey', 'test키', 'test\u200bkey']) {
+    const events = [];
+    await withServer({ apiKey: invalidKey, fetchImpl: async () => assert.fail('잘못된 키로 OpenAI를 호출하면 안 됨'), logError: event => events.push(event) }, async url => {
+      const response = await post(url, [{ role: 'user', content: '안녕' }]);
+      const data = await response.json();
+      assert.equal(response.status, 503);
+      assert.equal(data.diagnostic.stage, 'configuration');
+      assert.equal(data.diagnostic.failureReason, 'invalid_api_key_format');
+      assert.equal(data.diagnostic.upstreamStatus, null);
+      assert.ok(!JSON.stringify({ data, events }).includes(invalidKey));
+    });
+  }
+});
+
 test('HTTP 200의 JSON 처리 실패와 헤더·네트워크 오류를 구분하며 원문 오류를 출력하지 않는다', async () => {
   const messages = [{ role: 'user', content: '안녕' }];
   for (const [fetchImpl, stage, upstreamStatus, failureReason, networkCode] of [

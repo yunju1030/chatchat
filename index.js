@@ -23,6 +23,9 @@ function upstreamMetadata(response, data) {
 }
 
 export function createApp({ fetchImpl = fetch, apiKey = process.env.OPENAI_API_KEY, logError = event => console.error(JSON.stringify(event)) } = {}) {
+  // Deployment dashboards can paste a trailing newline into an environment variable.
+  // Remove surrounding whitespace; reject embedded whitespace/control characters.
+  const normalizedApiKey = typeof apiKey === 'string' ? apiKey.trim() : '';
   const app = express();
   app.disable('x-powered-by');
   app.use((_req, res, next) => {
@@ -42,7 +45,16 @@ export function createApp({ fetchImpl = fetch, apiKey = process.env.OPENAI_API_K
         messages.reduce((length, message) => length + message.content.length, 0) > 60000) {
       return res.status(400).json({ error: '대화 형식 또는 길이가 올바르지 않습니다. 새 대화를 시작하거나 입력을 줄여 주세요.' });
     }
-    if (!apiKey) return res.status(503).json({ error: '서버에 OPENAI_API_KEY가 설정되지 않았습니다.' });
+    if (!normalizedApiKey) return res.status(503).json({ error: '서버에 OPENAI_API_KEY가 설정되지 않았습니다.' });
+    if (!/^[\x21-\x7E]+$/.test(normalizedApiKey)) {
+      const diagnostic = {
+        stage: 'configuration', upstreamStatus: null, openaiRequestId: null,
+        errorType: null, errorCode: null, errorParam: null, finishReason: null,
+        errorKind: 'ConfigurationError', failureReason: 'invalid_api_key_format', networkCode: null
+      };
+      logError({ event: 'chat_api_failure', ...diagnostic });
+      return res.status(503).json({ error: '서버의 OPENAI_API_KEY 형식이 올바르지 않습니다. 배포 환경변수에 키만 한 줄로 입력하고 다시 배포해 주세요.', diagnostic });
+    }
     if (req.body.memory !== undefined && !validMemory(req.body.memory)) {
       return res.status(400).json({ error: '대화 기억 형식이 올바르지 않습니다. 새 대화를 시작해 주세요.' });
     }
@@ -64,7 +76,7 @@ export function createApp({ fetchImpl = fetch, apiKey = process.env.OPENAI_API_K
         metadata = { upstreamStatus: null, openaiRequestId: null, errorType: null, errorCode: null, errorParam: null, finishReason: null };
         const response = await fetchImpl('https://api.openai.com/v1/chat/completions', {
           method: 'POST',
-          headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+          headers: { Authorization: `Bearer ${normalizedApiKey}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ model: 'gpt-4o-mini', messages: promptMessages, max_completion_tokens: 2400, response_format: responseFormat, store: false }),
           signal
         });
